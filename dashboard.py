@@ -19,7 +19,7 @@ except ImportError:
 # ======================================================
 # เกณฑ์ตัดสินใจ (ปรับค่าได้)
 # ======================================================
-HEALTH_MAX_MINUTES = 10           # Scanner ต้องรันใน X นาทีล่าสุด
+HEALTH_MAX_MINUTES = 25           # Scanner ต้องรันใน X นาทีล่าสุด
 MIN_DATA_HOURS = 24               # ต้องมีข้อมูลอย่างน้อย X ชั่วโมง
 MIN_OPPORTUNITIES = 1             # ต้องเจอ violation ≥ X อันใน 24h
 EDGE_THRESHOLD_PCT = 3.0          # Edge ต้อง > X% (Polymarket fee = 2%)
