@@ -19,7 +19,7 @@ except ImportError:
 # ======================================================
 # เกณฑ์ตัดสินใจ (ปรับค่าได้)
 # ======================================================
-HEALTH_MAX_MINUTES = 10           # Scanner ต้องรันใน X นาทีล่าสุด
+HEALTH_MAX_MINUTES = 25           # Scanner ต้องรันใน X นาทีล่าสุด
 MIN_DATA_HOURS = 24               # ต้องมีข้อมูลอย่างน้อย X ชั่วโมง
 MIN_OPPORTUNITIES = 1             # ต้องเจอ violation ≥ X อันใน 24h
 EDGE_THRESHOLD_PCT = 3.0          # Edge ต้อง > X% (Polymarket fee = 2%)
@@ -85,16 +85,23 @@ minutes_since_last = (now - snapshots_df["scanned_at"].max()).total_seconds() / 
 test1_pass = minutes_since_last < HEALTH_MAX_MINUTES
 
 
-# ---- Test 1.5: Scan reliability (24h) ----
+# ---- Test 1.5: Scan reliability (scale ตามอายุข้อมูลจริง) ----
 SCAN_INTERVAL_MIN = 15  # cron interval
-EXPECTED_SCANS_24H = (24 * 60) // SCAN_INTERVAL_MIN  # 96
 RELIABILITY_THRESHOLD = 0.85  # 85% ของ scans ต้องสำเร็จ
 
 cutoff_24h = now - timedelta(hours=24)
-snapshots_24h = snapshots_df[snapshots_df["scanned_at"] > cutoff_24h]
-# นับจำนวน unique scan batches (group ตามนาที rounded)
-scan_batches = snapshots_24h["scanned_at"].dt.floor("5min").nunique()
-reliability_pct = (scan_batches / EXPECTED_SCANS_24H) * 100 if EXPECTED_SCANS_24H else 0
+snapshots_recent = snapshots_df[snapshots_df["scanned_at"] > cutoff_24h]
+
+# คำนวณ expected ตามช่วงเวลาที่มี data จริง (สูงสุด 24 ชั่วโมง)
+if not snapshots_recent.empty:
+    oldest_recent = snapshots_recent["scanned_at"].min()
+    actual_window_hours = min((now - oldest_recent).total_seconds() / 3600, 24)
+else:
+    actual_window_hours = 0
+
+EXPECTED_SCANS = max(1, int(actual_window_hours * 60 / SCAN_INTERVAL_MIN))
+scan_batches = snapshots_recent["scanned_at"].dt.floor("5min").nunique()
+reliability_pct = (scan_batches / EXPECTED_SCANS) * 100 if EXPECTED_SCANS else 0
 reliability_pass = reliability_pct >= RELIABILITY_THRESHOLD * 100
 
 
@@ -238,10 +245,14 @@ render_test(
 
 
 # ---- Scan Reliability ----
-st.subheader("⚙️ Scan Reliability (24h)")
+st.subheader(f"⚙️ Scan Reliability ({actual_window_hours:.1f}h ล่าสุด)")
 
 rc1, rc2, rc3 = st.columns(3)
-rc1.metric("Expected scans", EXPECTED_SCANS_24H, help="รัน 15 นาที × 24 ชั่วโมง = 96 ครั้ง")
+rc1.metric(
+    "Expected scans",
+    EXPECTED_SCANS,
+    help=f"คำนวณจาก {actual_window_hours:.1f} ชั่วโมง × 4 scans/ชั่วโมง (ทุก 15 นาที)",
+)
 rc2.metric("Actual scans", scan_batches)
 rc3.metric(
     "Reliability",
