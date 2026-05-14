@@ -62,7 +62,7 @@ def load_snapshots(limit=10000):
     )
     df = pd.DataFrame(res.data)
     if not df.empty:
-        df["scanned_at"] = pd.to_datetime(df["scanned_at"])
+        df["scanned_at"] = pd.to_datetime(df["scanned_at"], utc=True)
         df["price"] = pd.to_numeric(df["price"])
     return df
 
