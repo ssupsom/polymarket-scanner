@@ -7,9 +7,6 @@ on:
   push:
     branches: [main]
 
-  # ปุ่มรันด้วยมือใน GitHub UI
-  workflow_dispatch:
-
 jobs:
   scan:
     runs-on: ubuntu-latest
