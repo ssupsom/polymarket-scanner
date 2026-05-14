@@ -1,9 +1,11 @@
 name: Polymarket Scanner
 
 on:
-  # รันตามเวลา ทุก 15 นาที
   schedule:
     - cron: '*/15 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
 
   # ปุ่มรันด้วยมือใน GitHub UI
   workflow_dispatch:
