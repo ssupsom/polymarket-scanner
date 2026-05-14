@@ -19,7 +19,7 @@ except ImportError:
 # ======================================================
 # เกณฑ์ตัดสินใจ (ปรับค่าได้)
 # ======================================================
-HEALTH_MAX_MINUTES = 25           # Scanner ต้องรันใน X นาทีล่าสุด
+HEALTH_MAX_MINUTES = 10           # Scanner ต้องรันใน X นาทีล่าสุด
 MIN_DATA_HOURS = 24               # ต้องมีข้อมูลอย่างน้อย X ชั่วโมง
 MIN_OPPORTUNITIES = 1             # ต้องเจอ violation ≥ X อันใน 24h
 EDGE_THRESHOLD_PCT = 3.0          # Edge ต้อง > X% (Polymarket fee = 2%)
@@ -83,6 +83,19 @@ if snapshots_df.empty:
 # ---- Test 1: Scanner ทำงานหรือไม่ ----
 minutes_since_last = (now - snapshots_df["scanned_at"].max()).total_seconds() / 60
 test1_pass = minutes_since_last < HEALTH_MAX_MINUTES
+
+
+# ---- Test 1.5: Scan reliability (24h) ----
+SCAN_INTERVAL_MIN = 15  # cron interval
+EXPECTED_SCANS_24H = (24 * 60) // SCAN_INTERVAL_MIN  # 96
+RELIABILITY_THRESHOLD = 0.85  # 85% ของ scans ต้องสำเร็จ
+
+cutoff_24h = now - timedelta(hours=24)
+snapshots_24h = snapshots_df[snapshots_df["scanned_at"] > cutoff_24h]
+# นับจำนวน unique scan batches (group ตามนาที rounded)
+scan_batches = snapshots_24h["scanned_at"].dt.floor("5min").nunique()
+reliability_pct = (scan_batches / EXPECTED_SCANS_24H) * 100 if EXPECTED_SCANS_24H else 0
+reliability_pass = reliability_pct >= RELIABILITY_THRESHOLD * 100
 
 
 # ---- Test 2: ข้อมูลพอตัดสินใจหรือไม่ ----
@@ -222,6 +235,33 @@ render_test(
     f"> {EDGE_THRESHOLD_PCT}%",
     "Polymarket fee = 2% ของกำไร — ต้องมี buffer ให้กิน fee + slippage",
 )
+
+
+# ---- Scan Reliability ----
+st.subheader("⚙️ Scan Reliability (24h)")
+
+rc1, rc2, rc3 = st.columns(3)
+rc1.metric("Expected scans", EXPECTED_SCANS_24H, help="รัน 15 นาที × 24 ชั่วโมง = 96 ครั้ง")
+rc2.metric("Actual scans", scan_batches)
+rc3.metric(
+    "Reliability",
+    f"{reliability_pct:.0f}%",
+    delta=f"{'PASS' if reliability_pass else 'BELOW THRESHOLD'} (เกณฑ์ ≥{RELIABILITY_THRESHOLD*100:.0f}%)",
+    delta_color="normal" if reliability_pass else "inverse",
+)
+
+if reliability_pct < 50:
+    st.error(
+        f"⚠️ Scanner รันแค่ {reliability_pct:.0f}% ของที่ตั้งไว้ — "
+        "GitHub Actions อาจ skip cron runs บ่อย พิจารณาเพิ่ม external cron service"
+    )
+elif reliability_pct < RELIABILITY_THRESHOLD * 100:
+    st.warning(
+        f"Scanner รัน {reliability_pct:.0f}% ของที่ตั้งไว้ — "
+        "ต่ำกว่าเกณฑ์ 85% แต่ยังพอใช้งานได้"
+    )
+else:
+    st.success(f"✅ Scanner ทำงานเสถียร ({reliability_pct:.0f}% ของที่ตั้งไว้)")
 
 
 # ---- รายละเอียด Opportunities ----
