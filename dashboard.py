@@ -190,7 +190,7 @@ render_test(
     "pass" if test1_pass else "fail",
     f"{minutes_since_last:.0f} นาทีตั้งแต่ scan ล่าสุด",
     f"< {HEALTH_MAX_MINUTES} นาที",
-    "Scanner ควรรันทุก 5 นาที — ถ้าช้าเกินคือ GitHub Actions มีปัญหา",
+    "Scanner ควรรันทุก 15 นาที — ถ้าช้าเกินคือ GitHub Actions มีปัญหา",
 )
 
 if test2_pass:
