@@ -1,9 +1,9 @@
 name: Polymarket Scanner
 
 on:
-  # รันตามเวลา ทุก 5 นาที
+  # รันตามเวลา ทุก 15 นาที
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
 
   # ปุ่มรันด้วยมือใน GitHub UI
   workflow_dispatch:
