@@ -86,6 +86,15 @@ if snapshots_df.empty:
     st.stop()
 
 
+# ---- หา active scope (ตลาดที่ scan ในรอบล่าสุด) ----
+# Active = ตลาดที่มี snapshot ใน 30 นาทีล่าสุด
+recent_cutoff = now - timedelta(minutes=30)
+active_market_ids = set(
+    snapshots_df[snapshots_df["scanned_at"] > recent_cutoff]["market_id"].unique()
+)
+active_snapshots = snapshots_df[snapshots_df["market_id"].isin(active_market_ids)]
+
+
 # ---- Test 1: Scanner ทำงานหรือไม่ ----
 minutes_since_last = (now - snapshots_df["scanned_at"].max()).total_seconds() / 60
 test1_pass = minutes_since_last < HEALTH_MAX_MINUTES
@@ -96,7 +105,7 @@ SCAN_INTERVAL_MIN = 15  # cron interval
 RELIABILITY_THRESHOLD = 0.85  # 85% ของ scans ต้องสำเร็จ
 
 cutoff_24h = now - timedelta(hours=24)
-snapshots_recent = snapshots_df[snapshots_df["scanned_at"] > cutoff_24h]
+snapshots_recent = active_snapshots[active_snapshots["scanned_at"] > cutoff_24h]
 
 # คำนวณ expected ตามช่วงเวลาที่มี data จริง (สูงสุด 24 ชั่วโมง)
 if not snapshots_recent.empty:
@@ -111,14 +120,22 @@ reliability_pct = (scan_batches / EXPECTED_SCANS) * 100 if EXPECTED_SCANS else 0
 reliability_pass = reliability_pct >= RELIABILITY_THRESHOLD * 100
 
 
-# ---- Test 2: ข้อมูลพอตัดสินใจหรือไม่ ----
-data_age_hours = (now - snapshots_df["scanned_at"].min()).total_seconds() / 3600
+# ---- Test 2: ข้อมูลพอตัดสินใจหรือไม่ (ของ active scope) ----
+# ใช้ "เวลาที่ active scope เริ่มเก็บ" ไม่ใช่ DB ทั้งหมด
+if active_snapshots.empty:
+    data_age_hours = 0
+else:
+    # หาเวลาที่ตลาด active เริ่มถูก scan ครั้งแรก (median เพื่อกัน outlier)
+    first_seen_per_market = active_snapshots.groupby("market_id")["scanned_at"].min()
+    scope_start = first_seen_per_market.median()
+    data_age_hours = (now - scope_start).total_seconds() / 3600
+
 test2_pass = data_age_hours >= MIN_DATA_HOURS
 
 
-# ---- Test 3 & 4: Opportunities + Edge size ----
+# ---- Test 3 & 4: ใช้ snapshot ล่าสุดของ active scope ----
 latest = (
-    snapshots_df.sort_values("scanned_at")
+    active_snapshots.sort_values("scanned_at")
     .groupby(["market_id", "outcome"])
     .tail(1)
 )
@@ -236,9 +253,9 @@ else:
 render_test(
     c2, 2, "ข้อมูลพอตัดสินใจ",
     status2,
-    f"{data_age_hours:.1f} ชั่วโมง",
+    f"{data_age_hours:.1f} ชั่วโมง ({len(active_market_ids)} ตลาด active)",
     f"≥ {MIN_DATA_HOURS} ชั่วโมง",
-    "ต้องมีข้อมูลอย่างน้อย 1 วัน เพื่อเห็น pattern ของตลาด",
+    "นับจากเวลาที่ตลาดปัจจุบันเริ่มถูก scan — รีเซ็ตเมื่อขยาย scope",
 )
 
 render_test(
