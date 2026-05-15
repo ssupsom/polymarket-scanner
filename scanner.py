@@ -17,8 +17,8 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 POLYMARKET_API = "https://gamma-api.polymarket.com/markets"
 
-# ตั้งค่าจำนวนตลาดที่ดึง (เริ่มน้อยๆก่อน)
-LIMIT = 20
+# ตั้งค่าจำนวนตลาดที่ดึง
+LIMIT = 200
 
 
 def fetch_markets():
@@ -30,7 +30,7 @@ def fetch_markets():
         "order": "volume",
         "ascending": "false",  # เรียงจาก volume สูงสุด
     }
-    response = requests.get(POLYMARKET_API, params=params, timeout=30)
+    response = requests.get(POLYMARKET_API, params=params, timeout=60)
     response.raise_for_status()
     return response.json()
 
@@ -108,10 +108,15 @@ def main():
         print(f"ERROR บันทึก markets: {e}")
         return
 
-    # 4. Insert price snapshots (เพิ่มทุกครั้ง ไม่ overwrite)
+    # 4. Insert price snapshots (batch 500 rows/ครั้ง เพื่อไม่ติด Supabase limit)
     try:
-        supabase.table("price_snapshots").insert(snapshot_batch).execute()
-        print(f"บันทึก snapshots สำเร็จ")
+        BATCH_SIZE = 500
+        total = 0
+        for i in range(0, len(snapshot_batch), BATCH_SIZE):
+            chunk = snapshot_batch[i:i + BATCH_SIZE]
+            supabase.table("price_snapshots").insert(chunk).execute()
+            total += len(chunk)
+        print(f"บันทึก {total} snapshots สำเร็จ")
     except Exception as e:
         print(f"ERROR บันทึก snapshots: {e}")
         return
