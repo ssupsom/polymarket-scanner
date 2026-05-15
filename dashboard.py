@@ -21,9 +21,15 @@ except ImportError:
 # ======================================================
 HEALTH_MAX_MINUTES = 25           # Scanner ต้องรันใน X นาทีล่าสุด
 MIN_DATA_HOURS = 24               # ต้องมีข้อมูลอย่างน้อย X ชั่วโมง
-MIN_OPPORTUNITIES = 1             # ต้องเจอ violation ≥ X อันใน 24h
-EDGE_THRESHOLD_PCT = 3.0          # Edge ต้อง > X% (Polymarket fee = 2%)
-VIOLATION_THRESHOLD = 0.02        # ตลาดที่ |Σprice - 1| > X = violation
+
+# Discovery: นับ violations (ดูว่าตลาด move ไหม)
+DISCOVERY_THRESHOLD = 0.01        # >= 1% deviation = ตลาดมี movement
+MIN_DISCOVERIES = 1               # ต้องเจอ ≥ X discoveries
+
+# Profitability: ต้องผ่านเกณฑ์นี้ถึงจะ "เทรดได้จริง"
+POLYMARKET_FEE_PCT = 2.0          # ค่าธรรมเนียม Polymarket
+PROFIT_BUFFER_PCT = 1.0           # buffer สำหรับ slippage/gas
+EDGE_THRESHOLD_PCT = POLYMARKET_FEE_PCT + PROFIT_BUFFER_PCT  # = 3.0% (กำไรจริงหลังหัก fee)
 
 
 # ======================================================
@@ -125,11 +131,14 @@ sum_per_market = (
 two_outcome = sum_per_market[sum_per_market["n_outcomes"] == 2].copy()
 two_outcome["deviation"] = (two_outcome["sum_price"] - 1.0).abs()
 
-violations = two_outcome[two_outcome["deviation"] > VIOLATION_THRESHOLD]
-test3_pass = len(violations) >= MIN_OPPORTUNITIES
+violations = two_outcome[two_outcome["deviation"] > DISCOVERY_THRESHOLD]
+test3_pass = len(violations) >= MIN_DISCOVERIES
 
 max_edge_pct = violations["deviation"].max() * 100 if not violations.empty else 0
 test4_pass = max_edge_pct > EDGE_THRESHOLD_PCT
+
+# จำนวนตลาดที่ทำกำไรได้จริงหลังหัก fee
+profitable = violations[violations["deviation"] * 100 > EDGE_THRESHOLD_PCT]
 
 
 # ======================================================
@@ -151,14 +160,19 @@ elif not test2_pass:
 elif test3_pass and test4_pass:
     verdict_color = "success"
     verdict_title = "🟢 PROCEED"
-    verdict_msg = f"พบ **{len(violations)} ตลาด** ที่มี edge > {EDGE_THRESHOLD_PCT}% — น่าลงทุนต่อ"
+    verdict_msg = (
+        f"พบ **{len(profitable)} ตลาด** ที่กำไรหลังหัก fee {POLYMARKET_FEE_PCT}% — น่าลงทุนต่อ"
+    )
     next_action = "Phase 2: เริ่ม paper trade ทดสอบกลยุทธ์ก่อน deploy ทุนจริง"
 
 elif test3_pass and not test4_pass:
     verdict_color = "warning"
     verdict_title = "🟡 MARGINAL"
-    verdict_msg = f"มี {len(violations)} opportunities แต่ edge เล็กเกินไป (max {max_edge_pct:.1f}%)"
-    next_action = "ขยาย scope: เพิ่ม LIMIT จาก 20 เป็น 100 ตลาด เพื่อหาตลาด niche"
+    verdict_msg = (
+        f"พบ {len(violations)} ตลาดที่ Σ(prices) เพี้ยน แต่ edge สูงสุดแค่ {max_edge_pct:.1f}% — "
+        f"**ไม่คุ้ม fee {POLYMARKET_FEE_PCT}%** (ขาดทุนถ้าเทรด)"
+    )
+    next_action = "ตลาดมี movement แต่ไม่พอ — ขยายเป็น 500 ตลาด หรือเปลี่ยน strategy"
 
 else:
     verdict_color = "error"
@@ -231,16 +245,16 @@ render_test(
     c1, 3, "พบ Arb Opportunities",
     "pass" if test3_pass else ("wait" if not test2_pass else "fail"),
     f"{len(violations)} ตลาด มี Σ(prices) ผิดจาก 1.0",
-    f"≥ {MIN_OPPORTUNITIES} ตลาด deviation > {VIOLATION_THRESHOLD*100:.0f}%",
-    "ตลาด 2-outcome ที่ Σ(Yes + No) ≠ 1 = มี mispricing",
+    f"≥ {MIN_DISCOVERIES} ตลาด deviation > {DISCOVERY_THRESHOLD*100:.0f}%",
+    "ตลาด 2-outcome ที่ Σ(Yes + No) ≠ 1 = มี mispricing (ยังไม่หัก fee)",
 )
 
 render_test(
     c2, 4, "Edge ใหญ่พอคุ้ม Fee",
     "pass" if test4_pass else ("wait" if not test3_pass else "fail"),
-    f"{max_edge_pct:.2f}% (max deviation)",
-    f"> {EDGE_THRESHOLD_PCT}%",
-    "Polymarket fee = 2% ของกำไร — ต้องมี buffer ให้กิน fee + slippage",
+    f"{max_edge_pct:.2f}% (max) — กำไรได้ {len(profitable)} ตลาด",
+    f"> {EDGE_THRESHOLD_PCT}% (fee {POLYMARKET_FEE_PCT}% + buffer {PROFIT_BUFFER_PCT}%)",
+    "Polymarket fee = 2% — ต้องมี edge เกินนี้ถึงจะเทรดแล้วกำไรจริง",
 )
 
 
@@ -279,7 +293,7 @@ else:
 st.subheader("🎯 ตลาดที่พบ Opportunity")
 
 if violations.empty:
-    st.info("ยังไม่พบตลาดที่มี deviation เกิน 2% — ตลาดอยู่ในภาวะ efficient")
+    st.info(f"ยังไม่พบตลาดที่มี deviation เกิน {DISCOVERY_THRESHOLD*100:.0f}% — ตลาดอยู่ในภาวะ efficient")
 else:
     opps = violations.merge(
         markets_df[["id", "question"]], left_on="market_id", right_on="id", how="left"
@@ -287,10 +301,24 @@ else:
     opps = opps.sort_values("deviation", ascending=False)
     opps["edge_pct"] = (opps["deviation"] * 100).round(2)
     opps["sum_price"] = opps["sum_price"].round(4)
+    opps["status"] = opps["edge_pct"].apply(
+        lambda x: f"✅ กำไร (+{x - EDGE_THRESHOLD_PCT:.1f}%)" if x > EDGE_THRESHOLD_PCT
+        else f"❌ ขาดทุน ({x - EDGE_THRESHOLD_PCT:.1f}%)"
+    )
+
+    st.caption(
+        f"💡 ตลาดที่ edge > {EDGE_THRESHOLD_PCT}% ถึงจะกำไรหลังหัก Polymarket fee "
+        f"({POLYMARKET_FEE_PCT}%) + buffer ({PROFIT_BUFFER_PCT}%)"
+    )
 
     st.dataframe(
-        opps[["question", "sum_price", "edge_pct"]].rename(
-            columns={"question": "คำถาม", "sum_price": "Σ(prices)", "edge_pct": "Edge %"}
+        opps[["question", "sum_price", "edge_pct", "status"]].rename(
+            columns={
+                "question": "คำถาม",
+                "sum_price": "Σ(prices)",
+                "edge_pct": "Edge %",
+                "status": "สถานะ (หลัง fee)",
+            }
         ).head(20),
         use_container_width=True,
         hide_index=True,
