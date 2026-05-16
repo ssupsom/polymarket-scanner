@@ -1,57 +1,41 @@
 """
-Polymarket Scanner - Decision Dashboard
-ตอบคำถามหลัก: "ตลาดนี้เล่นได้ไหม?"
+Polymarket Scanner — Multi-Strategy Decision Dashboard
+แสดงผลทุก strategy พร้อมๆกัน + verdict รวม
 """
 
 import os
-import streamlit as st
-import pandas as pd
 from datetime import datetime, timedelta, timezone
+
+import pandas as pd
+import streamlit as st
 from supabase import create_client
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+from strategies import ALL_STRATEGIES, run_all_strategies
 
 
 # ======================================================
-# เกณฑ์ตัดสินใจ (ปรับค่าได้)
+# Config
 # ======================================================
-HEALTH_MAX_MINUTES = 25           # Scanner ต้องรันใน X นาทีล่าสุด
-MIN_DATA_HOURS = 24               # ต้องมีข้อมูลอย่างน้อย X ชั่วโมง
+st.set_page_config(
+    page_title="Polymarket Scanner",
+    page_icon="📊",
+    layout="wide",
+)
 
-# Discovery: นับ violations (ดูว่าตลาด move ไหม)
-DISCOVERY_THRESHOLD = 0.01        # >= 1% deviation = ตลาดมี movement
-MIN_DISCOVERIES = 1               # ต้องเจอ ≥ X discoveries
-
-# Profitability: ต้องผ่านเกณฑ์นี้ถึงจะ "เทรดได้จริง"
-POLYMARKET_FEE_PCT = 2.0          # ค่าธรรมเนียม Polymarket
-PROFIT_BUFFER_PCT = 1.0           # buffer สำหรับ slippage/gas
-EDGE_THRESHOLD_PCT = POLYMARKET_FEE_PCT + PROFIT_BUFFER_PCT  # = 3.0% (กำไรจริงหลังหัก fee)
+HEALTH_MAX_MINUTES = 25
+MIN_DATA_HOURS = 24
+SCAN_INTERVAL_MIN = 15
+RELIABILITY_THRESHOLD = 0.85
 
 
 # ======================================================
-# Setup
+# Data loading
 # ======================================================
-st.set_page_config(page_title="Polymarket Scanner", page_icon="📊", layout="wide")
-
-
-def get_secret(key):
-    try:
-        return st.secrets[key]
-    except (KeyError, FileNotFoundError):
-        val = os.getenv(key)
-        if not val:
-            st.error(f"ไม่พบ {key}")
-            st.stop()
-        return val
-
-
 @st.cache_resource
 def get_supabase():
-    return create_client(get_secret("SUPABASE_URL"), get_secret("SUPABASE_KEY"))
+    url = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_KEY") or os.getenv("SUPABASE_KEY")
+    return create_client(url, key)
 
 
 @st.cache_data(ttl=60)
@@ -68,310 +52,215 @@ def load_data():
     )
     if not snapshots.empty:
         snapshots["scanned_at"] = pd.to_datetime(snapshots["scanned_at"], utc=True)
-        snapshots["price"] = pd.to_numeric(snapshots["price"])
     return markets, snapshots
 
 
-markets_df, snapshots_df = load_data()
-
-
 # ======================================================
-# คำนวณผลการทดสอบ
+# Header
 # ======================================================
-now = datetime.now(timezone.utc)
+st.title("📊 Polymarket Scanner")
+st.caption("Multi-Strategy Decision Dashboard — ตรวจหา edge หลายรูปแบบพร้อมกัน")
+
+with st.spinner("กำลังโหลดข้อมูล..."):
+    markets_df, snapshots_df = load_data()
 
 if snapshots_df.empty:
-    st.title("📊 Polymarket Scanner")
-    st.error("## 🔴 NO DATA\nยังไม่มีข้อมูลใน Supabase — รอ scanner รันครั้งแรก")
+    st.error("ไม่มีข้อมูลใน DB — Scanner ยังไม่รันหรือ connection ผิดพลาด")
     st.stop()
 
 
-# ---- หา active scope (ตลาดที่ scan ในรอบล่าสุด) ----
-# Active = ตลาดที่มี snapshot ใน 30 นาทีล่าสุด
+# ======================================================
+# Compute system health
+# ======================================================
+now = pd.Timestamp.now(tz="UTC")
+
+# Active scope = ตลาดที่มี snapshot ใน 30 นาทีล่าสุด
 recent_cutoff = now - timedelta(minutes=30)
 active_market_ids = set(
     snapshots_df[snapshots_df["scanned_at"] > recent_cutoff]["market_id"].unique()
 )
 active_snapshots = snapshots_df[snapshots_df["market_id"].isin(active_market_ids)]
+active_markets = markets_df[markets_df["id"].isin(active_market_ids)] if not markets_df.empty else markets_df
 
-
-# ---- Test 1: Scanner ทำงานหรือไม่ ----
+# Health metrics
 minutes_since_last = (now - snapshots_df["scanned_at"].max()).total_seconds() / 60
-test1_pass = minutes_since_last < HEALTH_MAX_MINUTES
+scanner_ok = minutes_since_last < HEALTH_MAX_MINUTES
 
-
-# ---- Test 1.5: Scan reliability (scale ตามอายุข้อมูลจริง) ----
-SCAN_INTERVAL_MIN = 15  # cron interval
-RELIABILITY_THRESHOLD = 0.85  # 85% ของ scans ต้องสำเร็จ
-
-cutoff_24h = now - timedelta(hours=24)
-snapshots_recent = active_snapshots[active_snapshots["scanned_at"] > cutoff_24h]
-
-# คำนวณ expected ตามช่วงเวลาที่มี data จริง (สูงสุด 24 ชั่วโมง)
-if not snapshots_recent.empty:
-    oldest_recent = snapshots_recent["scanned_at"].min()
-    actual_window_hours = min((now - oldest_recent).total_seconds() / 3600, 24)
-else:
-    actual_window_hours = 0
-
-EXPECTED_SCANS = max(1, int(actual_window_hours * 60 / SCAN_INTERVAL_MIN))
-scan_batches = snapshots_recent["scanned_at"].dt.floor("5min").nunique()
-reliability_pct = (scan_batches / EXPECTED_SCANS) * 100 if EXPECTED_SCANS else 0
-reliability_pass = reliability_pct >= RELIABILITY_THRESHOLD * 100
-
-
-# ---- Test 2: ข้อมูลพอตัดสินใจหรือไม่ (ของ active scope) ----
-# ใช้ "เวลาที่ active scope เริ่มเก็บ" ไม่ใช่ DB ทั้งหมด
-if active_snapshots.empty:
-    data_age_hours = 0
-else:
-    # หาเวลาที่ตลาด active เริ่มถูก scan ครั้งแรก (median เพื่อกัน outlier)
+# Data age (active scope)
+if not active_snapshots.empty:
     first_seen_per_market = active_snapshots.groupby("market_id")["scanned_at"].min()
     scope_start = first_seen_per_market.median()
     data_age_hours = (now - scope_start).total_seconds() / 3600
-
-test2_pass = data_age_hours >= MIN_DATA_HOURS
-
-
-# ---- Test 3 & 4: ใช้ snapshot ล่าสุดของ active scope ----
-latest = (
-    active_snapshots.sort_values("scanned_at")
-    .groupby(["market_id", "outcome"])
-    .tail(1)
-)
-
-sum_per_market = (
-    latest.groupby("market_id")
-    .agg(sum_price=("price", "sum"), n_outcomes=("outcome", "count"))
-    .reset_index()
-)
-two_outcome = sum_per_market[sum_per_market["n_outcomes"] == 2].copy()
-two_outcome["deviation"] = (two_outcome["sum_price"] - 1.0).abs()
-
-violations = two_outcome[two_outcome["deviation"] > DISCOVERY_THRESHOLD]
-test3_pass = len(violations) >= MIN_DISCOVERIES
-
-max_edge_pct = violations["deviation"].max() * 100 if not violations.empty else 0
-test4_pass = max_edge_pct > EDGE_THRESHOLD_PCT
-
-# จำนวนตลาดที่ทำกำไรได้จริงหลังหัก fee
-profitable = violations[violations["deviation"] * 100 > EDGE_THRESHOLD_PCT]
-
-
-# ======================================================
-# Verdict Logic
-# ======================================================
-if not test1_pass:
-    verdict_color = "error"
-    verdict_title = "🔴 SYSTEM ERROR"
-    verdict_msg = "Scanner ไม่ทำงาน — ตรวจ GitHub Actions ก่อนทำอะไรต่อ"
-    next_action = "ไปที่ GitHub Actions ดูว่ารัน fail อะไร"
-
-elif not test2_pass:
-    hours_left = MIN_DATA_HOURS - data_age_hours
-    verdict_color = "warning"
-    verdict_title = "🟡 WAITING FOR DATA"
-    verdict_msg = f"ยังเก็บข้อมูลไม่พอตัดสินใจ — รออีก **{hours_left:.0f} ชั่วโมง**"
-    next_action = "ไม่ต้องทำอะไร — ระบบเก็บข้อมูลเอง กลับมาดูทีหลัง"
-
-elif test3_pass and test4_pass:
-    verdict_color = "success"
-    verdict_title = "🟢 PROCEED"
-    verdict_msg = (
-        f"พบ **{len(profitable)} ตลาด** ที่กำไรหลังหัก fee {POLYMARKET_FEE_PCT}% — น่าลงทุนต่อ"
-    )
-    next_action = "Phase 2: เริ่ม paper trade ทดสอบกลยุทธ์ก่อน deploy ทุนจริง"
-
-elif test3_pass and not test4_pass:
-    verdict_color = "warning"
-    verdict_title = "🟡 MARGINAL"
-    verdict_msg = (
-        f"พบ {len(violations)} ตลาดที่ Σ(prices) เพี้ยน แต่ edge สูงสุดแค่ {max_edge_pct:.1f}% — "
-        f"**ไม่คุ้ม fee {POLYMARKET_FEE_PCT}%** (ขาดทุนถ้าเทรด)"
-    )
-    next_action = "ตลาดมี movement แต่ไม่พอ — ขยายเป็น 500 ตลาด หรือเปลี่ยน strategy"
-
 else:
-    verdict_color = "error"
-    verdict_title = "🔴 NO EDGE"
-    verdict_msg = "ตลาด top 20 efficient เกินไป — ไม่พบ opportunity"
-    next_action = "ขยาย scope: เพิ่ม LIMIT จาก 20 เป็น 100+ ตลาด หรือลองตลาดอื่น"
+    data_age_hours = 0
+data_ready = data_age_hours >= MIN_DATA_HOURS
 
 
 # ======================================================
-# Render UI
+# Run all strategies
 # ======================================================
-st.title("📊 Polymarket Scanner")
-st.caption("Decision Dashboard — ตอบคำถาม: ตลาดนี้เล่นได้ไหม?")
+with st.spinner("กำลังรัน strategies..."):
+    strategy_results = run_all_strategies(active_snapshots, active_markets)
 
-# ---- VERDICT (ใหญ่ๆบนสุด) ----
-verdict_box = f"## {verdict_title}\n\n{verdict_msg}\n\n**Next:** {next_action}"
+
+# ======================================================
+# Overall verdict
+# ======================================================
+total_profitable = sum(s.get("profitable_count", 0) for s in strategy_results)
+total_discoveries = sum(s.get("total_discoveries", 0) for s in strategy_results)
+strategies_with_profitable = [s for s in strategy_results if s.get("has_profitable", False)]
+
+if not scanner_ok:
+    verdict = ("🔴 SYSTEM ERROR", "error", "Scanner ไม่ทำงาน — ตรวจ GitHub Actions ก่อนทำอะไรต่อ")
+elif not data_ready:
+    hours_left = max(0, MIN_DATA_HOURS - data_age_hours)
+    verdict = (
+        "🟡 WAITING FOR DATA",
+        "warning",
+        f"ยังเก็บข้อมูลไม่พอตัดสินใจ — รออีก {hours_left:.0f} ชั่วโมง ({len(active_market_ids)} ตลาด active)"
+    )
+elif strategies_with_profitable:
+    names = [s["name"] for s in strategies_with_profitable]
+    verdict = (
+        "🟢 PROCEED",
+        "success",
+        f"พบ {total_profitable} opportunities ที่กำไรหลังหัก fee — strategies: {', '.join(names)}"
+    )
+elif total_discoveries > 0:
+    verdict = (
+        "🟡 MARGINAL",
+        "warning",
+        f"พบ {total_discoveries} discoveries แต่ไม่กำไรหลังหัก fee — ตลาดมี movement แต่ edge ไม่พอ"
+    )
+else:
+    verdict = (
+        "🔴 NO EDGE",
+        "error",
+        "ไม่พบ opportunity ใดในทุก strategy — Polymarket top markets efficient เกินไป"
+    )
+
+verdict_title, verdict_color, verdict_msg = verdict
 if verdict_color == "success":
-    st.success(verdict_box)
+    st.success(f"## {verdict_title}\n\n{verdict_msg}")
 elif verdict_color == "warning":
-    st.warning(verdict_box)
+    st.warning(f"## {verdict_title}\n\n{verdict_msg}")
 else:
-    st.error(verdict_box)
+    st.error(f"## {verdict_title}\n\n{verdict_msg}")
 
 
-# ---- ผลทดสอบ 4 ข้อ ----
-st.subheader("📋 ผลการทดสอบ 4 ข้อ")
+# ======================================================
+# System metrics
+# ======================================================
+st.divider()
+st.subheader("⚙️ System Health")
 
-c1, c2 = st.columns(2)
-
-
-def render_test(col, num, title, status, value, criteria, explain):
-    icon = "✅" if status == "pass" else ("⏳" if status == "wait" else "❌")
-    color = "#1D9E75" if status == "pass" else ("#BA7517" if status == "wait" else "#A32D2D")
-    col.markdown(
-        f"""
-        <div style="border-left: 4px solid {color}; padding: 8px 16px; margin-bottom: 12px;">
-        <b>{icon} Test {num}: {title}</b><br>
-        ค่าที่วัดได้: <code>{value}</code><br>
-        เกณฑ์ผ่าน: <code>{criteria}</code><br>
-        <small style="color: #888;">{explain}</small>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-render_test(
-    c1, 1, "Scanner ทำงานต่อเนื่อง",
-    "pass" if test1_pass else "fail",
-    f"{minutes_since_last:.0f} นาทีตั้งแต่ scan ล่าสุด",
-    f"< {HEALTH_MAX_MINUTES} นาที",
-    "Scanner ควรรันทุก 15 นาที — ถ้าช้าเกินคือ GitHub Actions มีปัญหา",
+h1, h2, h3, h4 = st.columns(4)
+h1.metric(
+    "Scanner",
+    "✅ OK" if scanner_ok else "❌ DOWN",
+    f"{minutes_since_last:.0f} นาทีล่าสุด",
+)
+h2.metric(
+    "Active Markets",
+    len(active_market_ids),
+)
+h3.metric(
+    "Data Age (active scope)",
+    f"{data_age_hours:.1f}h / {MIN_DATA_HOURS}h",
+    delta=f"{'PASS' if data_ready else 'WAITING'}",
+    delta_color="normal" if data_ready else "off",
 )
 
-if test2_pass:
-    status2 = "pass"
-elif data_age_hours > 0:
-    status2 = "wait"
+# Reliability
+cutoff_24h = now - timedelta(hours=24)
+recent_active = active_snapshots[active_snapshots["scanned_at"] > cutoff_24h]
+if not recent_active.empty:
+    window_hours = min((now - recent_active["scanned_at"].min()).total_seconds() / 3600, 24)
+    expected = max(1, int(window_hours * 60 / SCAN_INTERVAL_MIN))
+    actual = recent_active["scanned_at"].dt.floor("5min").nunique()
+    reliability_pct = (actual / expected) * 100
 else:
-    status2 = "fail"
-render_test(
-    c2, 2, "ข้อมูลพอตัดสินใจ",
-    status2,
-    f"{data_age_hours:.1f} ชั่วโมง ({len(active_market_ids)} ตลาด active)",
-    f"≥ {MIN_DATA_HOURS} ชั่วโมง",
-    "นับจากเวลาที่ตลาดปัจจุบันเริ่มถูก scan — รีเซ็ตเมื่อขยาย scope",
-)
-
-render_test(
-    c1, 3, "พบ Arb Opportunities",
-    "pass" if test3_pass else ("wait" if not test2_pass else "fail"),
-    f"{len(violations)} ตลาด มี Σ(prices) ผิดจาก 1.0",
-    f"≥ {MIN_DISCOVERIES} ตลาด deviation > {DISCOVERY_THRESHOLD*100:.0f}%",
-    "ตลาด 2-outcome ที่ Σ(Yes + No) ≠ 1 = มี mispricing (ยังไม่หัก fee)",
-)
-
-render_test(
-    c2, 4, "Edge ใหญ่พอคุ้ม Fee",
-    "pass" if test4_pass else ("wait" if not test3_pass else "fail"),
-    f"{max_edge_pct:.2f}% (max) — กำไรได้ {len(profitable)} ตลาด",
-    f"> {EDGE_THRESHOLD_PCT}% (fee {POLYMARKET_FEE_PCT}% + buffer {PROFIT_BUFFER_PCT}%)",
-    "Polymarket fee = 2% — ต้องมี edge เกินนี้ถึงจะเทรดแล้วกำไรจริง",
-)
-
-
-# ---- Scan Reliability ----
-st.subheader(f"⚙️ Scan Reliability ({actual_window_hours:.1f}h ล่าสุด)")
-
-rc1, rc2, rc3 = st.columns(3)
-rc1.metric(
-    "Expected scans",
-    EXPECTED_SCANS,
-    help=f"คำนวณจาก {actual_window_hours:.1f} ชั่วโมง × 4 scans/ชั่วโมง (ทุก 15 นาที)",
-)
-rc2.metric("Actual scans", scan_batches)
-rc3.metric(
+    reliability_pct = 0
+h4.metric(
     "Reliability",
     f"{reliability_pct:.0f}%",
-    delta=f"{'PASS' if reliability_pass else 'BELOW THRESHOLD'} (เกณฑ์ ≥{RELIABILITY_THRESHOLD*100:.0f}%)",
-    delta_color="normal" if reliability_pass else "inverse",
-)
-
-if reliability_pct < 50:
-    st.error(
-        f"⚠️ Scanner รันแค่ {reliability_pct:.0f}% ของที่ตั้งไว้ — "
-        "GitHub Actions อาจ skip cron runs บ่อย พิจารณาเพิ่ม external cron service"
-    )
-elif reliability_pct < RELIABILITY_THRESHOLD * 100:
-    st.warning(
-        f"Scanner รัน {reliability_pct:.0f}% ของที่ตั้งไว้ — "
-        "ต่ำกว่าเกณฑ์ 85% แต่ยังพอใช้งานได้"
-    )
-else:
-    st.success(f"✅ Scanner ทำงานเสถียร ({reliability_pct:.0f}% ของที่ตั้งไว้)")
-
-
-# ---- รายละเอียด Opportunities ----
-st.subheader("🎯 ตลาดที่พบ Opportunity")
-
-if violations.empty:
-    st.info(f"ยังไม่พบตลาดที่มี deviation เกิน {DISCOVERY_THRESHOLD*100:.0f}% — ตลาดอยู่ในภาวะ efficient")
-else:
-    opps = violations.merge(
-        markets_df[["id", "question"]], left_on="market_id", right_on="id", how="left"
-    )
-    opps = opps.sort_values("deviation", ascending=False)
-    opps["edge_pct"] = (opps["deviation"] * 100).round(2)
-    opps["sum_price"] = opps["sum_price"].round(4)
-    opps["status"] = opps["edge_pct"].apply(
-        lambda x: f"✅ กำไร (+{x - EDGE_THRESHOLD_PCT:.1f}%)" if x > EDGE_THRESHOLD_PCT
-        else f"❌ ขาดทุน ({x - EDGE_THRESHOLD_PCT:.1f}%)"
-    )
-
-    st.caption(
-        f"💡 ตลาดที่ edge > {EDGE_THRESHOLD_PCT}% ถึงจะกำไรหลังหัก Polymarket fee "
-        f"({POLYMARKET_FEE_PCT}%) + buffer ({PROFIT_BUFFER_PCT}%)"
-    )
-
-    st.dataframe(
-        opps[["question", "sum_price", "edge_pct", "status"]].rename(
-            columns={
-                "question": "คำถาม",
-                "sum_price": "Σ(prices)",
-                "edge_pct": "Edge %",
-                "status": "สถานะ (หลัง fee)",
-            }
-        ).head(20),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-# ---- Progress bar ----
-st.subheader("⏱️ ความคืบหน้าการเก็บข้อมูล")
-progress = min(data_age_hours / MIN_DATA_HOURS, 1.0)
-st.progress(progress)
-st.caption(
-    f"เก็บข้อมูลมาแล้ว {data_age_hours:.1f} / {MIN_DATA_HOURS} ชั่วโมง "
-    f"({progress*100:.0f}%) • {len(snapshots_df):,} snapshots"
+    delta=f"{'PASS' if reliability_pct >= RELIABILITY_THRESHOLD * 100 else 'LOW'}",
+    delta_color="normal" if reliability_pct >= RELIABILITY_THRESHOLD * 100 else "inverse",
 )
 
 
-# ---- ข้อมูลเสริม ----
-with st.expander("📈 ข้อมูลเสริม"):
-    st.markdown("**กิจกรรมของ Scanner (snapshots/ชั่วโมง)**")
-    snapshots_df["hour"] = snapshots_df["scanned_at"].dt.floor("h")
-    hourly = snapshots_df.groupby("hour").size()
-    st.line_chart(hourly, height=200)
-    st.caption("ปกติ ~40 snapshots/ชั่วโมง (20 ตลาด × 2 outcomes × 12 รอบ)")
+# ======================================================
+# Strategy cards
+# ======================================================
+st.divider()
+st.subheader("🎯 Strategy Results")
 
-    st.markdown("**ตลาดทั้งหมดที่ track**")
-    st.dataframe(
-        markets_df[["id", "question", "end_date"]].rename(
-            columns={"question": "คำถาม", "end_date": "End date"}
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
+cols_per_row = 2
+for i in range(0, len(strategy_results), cols_per_row):
+    cols = st.columns(cols_per_row)
+    for j, col in enumerate(cols):
+        if i + j >= len(strategy_results):
+            break
+        result = strategy_results[i + j]
+        with col:
+            with st.container(border=True):
+                if result.get("error"):
+                    status_icon = "⚠️"
+                elif result.get("has_profitable"):
+                    status_icon = "🟢"
+                elif result.get("total_discoveries", 0) > 0:
+                    status_icon = "🟡"
+                else:
+                    status_icon = "⚪"
+
+                st.markdown(f"### {status_icon} {result['name']}")
+                st.caption(result.get("description", ""))
+
+                if result.get("error"):
+                    st.error(f"Error: {result['error']}")
+                else:
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Discoveries", result.get("total_discoveries", 0))
+                    m2.metric("Profitable", result.get("profitable_count", 0))
+                    m3.metric("Max Edge", f"{result.get('max_edge_pct', 0):.2f}%")
 
 
-st.markdown("---")
+# ======================================================
+# Detailed opportunities
+# ======================================================
+st.divider()
+st.subheader("📋 รายละเอียด Opportunities")
+
+for result in strategy_results:
+    opps = result.get("opportunities", [])
+    if not opps:
+        continue
+
+    icon = "🟢" if result.get("has_profitable") else "🟡"
+    with st.expander(
+        f"{icon} {result['name']} — {len(opps)} discoveries"
+        + (f" ({result['profitable_count']} กำไร)" if result.get("profitable_count") else "")
+    ):
+        rows = []
+        for o in opps[:20]:
+            rows.append({
+                "Edge %": f"{o.edge_pct:.2f}%",
+                "Profitable": "✅" if o.is_profitable else "❌",
+                "Description": o.description,
+            })
+        st.dataframe(
+            pd.DataFrame(rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+# ======================================================
+# Footer
+# ======================================================
+st.divider()
 st.caption(
-    f"Refreshed every 60s • {len(snapshots_df):,} snapshots • "
-    f"Last scan: {snapshots_df['scanned_at'].max().strftime('%H:%M')} UTC"
+    f"🔄 Last scan: {snapshots_df['scanned_at'].max().strftime('%Y-%m-%d %H:%M UTC')} | "
+    f"💾 Snapshots loaded: {len(snapshots_df):,} | "
+    f"🎯 Strategies: {len(ALL_STRATEGIES)}"
 )
