@@ -87,12 +87,14 @@ class Velocity(BaseStrategy):
         # filter:
         # 1. ราคาทั้งคู่ต้องไม่ extreme (กัน resolved markets)
         # 2. absolute change ต้องใหญ่พอ
+        # 3. เก็บแค่ Yes outcome (Yes/No เป็น mirror ของกันและกัน — ไม่ต้องนับ 2 ครั้ง)
         fast = merged[
             (merged["abs_delta"] >= self.MIN_PRICE_DELTA)
             & (merged["price_now"] >= self.NOT_EXTREME_LOW)
             & (merged["price_now"] <= self.NOT_EXTREME_HIGH)
             & (merged["price_old"] >= self.NOT_EXTREME_LOW)
             & (merged["price_old"] <= self.NOT_EXTREME_HIGH)
+            & (merged["outcome"].isin(["Yes", "yes", "YES"]))
         ]
 
         # merge question
