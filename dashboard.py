@@ -62,7 +62,7 @@ def load_data():
         sb.table("price_snapshots")
         .select("*")
         .order("scanned_at", desc=True)
-        .limit(20000)
+        .limit(50000)
         .execute()
         .data
     )
