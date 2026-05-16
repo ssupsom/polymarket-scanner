@@ -28,10 +28,10 @@ from .base import BaseStrategy, Opportunity
 class CrossMarket(BaseStrategy):
 
     DISCOVERY_THRESHOLD = 0.02
-    SANITY_MAX_EDGE_PCT = 25.0   # edge > นี้ = false positive
+    SANITY_MAX_EDGE_PCT = 25.0
     MIN_GROUP_SIZE = 2
-    MAX_GROUP_SIZE = 4           # 5+ markets มัก match ผิด
-    MIN_KEYWORD_OVERLAP = 3      # อย่างน้อย 3 keywords ต้องตรงกัน
+    MAX_GROUP_SIZE = 3           # ลดจาก 4 — group ใหญ่มัก false positive
+    MIN_KEYWORD_OVERLAP = 4      # ต้องการ keyword unique มากขึ้น (จาก 3 เป็น 4)
     STOPWORDS = {
         "will", "the", "a", "an", "be", "in", "on", "at", "by", "to", "of",
         "is", "are", "was", "were", "and", "or", "for", "with", "this", "that",
@@ -54,6 +54,33 @@ class CrossMarket(BaseStrategy):
         # เก็บคำที่ยาว > 3 chars และไม่ใช่ stopword
         keywords = [w for w in words if len(w) > 3 and w not in self.STOPWORDS]
         return frozenset(keywords[:5])  # เก็บ 5 keyword หลัก
+
+    def _has_differentiator(self, questions: list) -> bool:
+        """
+        ตรวจว่า markets มี 'differentiator' ที่บอกว่าไม่ใช่ mutually exclusive
+        
+        ตัวอย่าง:
+          'Will Republican win the TX-38?' vs 'Will Republican win the CO-01?'
+          → TX-38 และ CO-01 เป็น differentiator (district codes)
+          → markets ไม่ mutually exclusive
+        
+        Heuristic: ถ้าทุก question มี pattern ตัวเลข/letter-number ที่ต่างกัน
+        → น่าจะมี differentiator → return True
+        """
+        # match patterns เช่น TX-38, CO-01, 2026, $100K, etc.
+        patterns = []
+        for q in questions:
+            if not q:
+                return False
+            # ดึง alphanumeric tokens ที่มีทั้งตัวอักษรและตัวเลข หรือ ตัวเลข + symbols
+            matches = re.findall(r"\b[A-Z]{2,}[-_]?\d+\b|\$\d+[KMB]?|\b\d{4}\b", q)
+            patterns.append(set(matches))
+        # ถ้าทุก question มี pattern ที่ unique = differentiator
+        if not all(patterns):
+            return False
+        # ดู unique patterns ของแต่ละ question
+        unique_per_q = [p - set.union(*[patterns[j] for j in range(len(patterns)) if j != i]) for i, p in enumerate(patterns)]
+        return all(len(u) > 0 for u in unique_per_q)
 
     def detect(
         self,
@@ -106,6 +133,11 @@ class CrossMarket(BaseStrategy):
 
             # sanity check
             if edge_pct > self.SANITY_MAX_EDGE_PCT:
+                continue
+
+            # ตรวจ differentiator — ถ้าตลาดมี ID/code ต่างกัน = ไม่ mutually exclusive
+            questions = [e["question"] for e in entries]
+            if self._has_differentiator(questions):
                 continue
 
             descriptions = [
