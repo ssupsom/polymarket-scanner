@@ -19,6 +19,10 @@ from .base import BaseStrategy, Opportunity
 
 class LadderViolation(BaseStrategy):
 
+    SANITY_MAX_EDGE_PCT = 30.0   # ถ้า edge > นี้ = ไม่ใช่ ladder จริง
+    MIN_PRICE = 0.05
+    MAX_PRICE = 0.95
+
     @property
     def name(self) -> str:
         return "Ladder Violation"
@@ -108,17 +112,27 @@ class LadderViolation(BaseStrategy):
             if len(entries) < 2:
                 continue
 
-            # sort by threshold value (จากน้อยไปมาก)
+            # sort by threshold value
             entries.sort(key=lambda e: e["value"])
 
             # ตรวจ ladder: ถ้า value สูงขึ้น แต่ price ก็สูงขึ้น = violation
-            # (P(X > 100) ต้อง ≥ P(X > 110) เสมอ)
             for i in range(len(entries) - 1):
                 low = entries[i]
                 high = entries[i + 1]
+
+                # ราคาทั้งคู่ต้องไม่ extreme (กัน resolved markets)
+                if not (self.MIN_PRICE <= low["price"] <= self.MAX_PRICE):
+                    continue
+                if not (self.MIN_PRICE <= high["price"] <= self.MAX_PRICE):
+                    continue
+
                 if high["price"] > low["price"]:
-                    # violation!
-                    edge = (high["price"] - low["price"]) * 100  # arb size %
+                    edge = (high["price"] - low["price"]) * 100
+
+                    # sanity check — edge ใหญ่เกินไป = false positive
+                    if edge > self.SANITY_MAX_EDGE_PCT:
+                        continue
+
                     opportunities.append(
                         Opportunity(
                             strategy_name=self.name,
