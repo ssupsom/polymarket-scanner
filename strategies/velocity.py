@@ -22,7 +22,9 @@ from .base import BaseStrategy, Opportunity
 class Velocity(BaseStrategy):
 
     LOOKBACK_HOURS = 1
-    DISCOVERY_THRESHOLD_PCT = 5.0  # ราคา move > 5% ใน 1 ชั่วโมง
+    MIN_PRICE_DELTA = 0.05       # ราคาขยับ >= 5 cents (absolute)
+    NOT_EXTREME_LOW = 0.10        # กรองตลาดราคา < 10% (resolve)
+    NOT_EXTREME_HIGH = 0.90       # กรองตลาดราคา > 90% (resolve)
 
     @property
     def name(self) -> str:
@@ -30,7 +32,7 @@ class Velocity(BaseStrategy):
 
     @property
     def description(self) -> str:
-        return f"ราคา move > {self.DISCOVERY_THRESHOLD_PCT}% ใน {self.LOOKBACK_HOURS} ชั่วโมง — อาจมี mispricing ชั่วคราว"
+        return f"ราคาขยับ ≥ {self.MIN_PRICE_DELTA:.2f} ใน {self.LOOKBACK_HOURS}h (ราคาไม่ extreme) — อาจมี mispricing"
 
     def detect(
         self,
@@ -74,16 +76,24 @@ class Velocity(BaseStrategy):
         if merged.empty:
             return []
 
-        # คำนวณ velocity (% change)
+        # คำนวณ delta (absolute change)
+        merged["abs_delta"] = (merged["price_now"] - merged["price_old"]).abs()
         merged["delta_pct"] = (
             (merged["price_now"] - merged["price_old"])
-            / merged["price_old"].clip(lower=0.001)  # ป้องกัน div by 0
+            / merged["price_old"].clip(lower=0.001)
             * 100
         )
-        merged["abs_delta"] = merged["delta_pct"].abs()
 
-        # filter ที่ velocity สูง
-        fast = merged[merged["abs_delta"] > self.DISCOVERY_THRESHOLD_PCT]
+        # filter:
+        # 1. ราคาทั้งคู่ต้องไม่ extreme (กัน resolved markets)
+        # 2. absolute change ต้องใหญ่พอ
+        fast = merged[
+            (merged["abs_delta"] >= self.MIN_PRICE_DELTA)
+            & (merged["price_now"] >= self.NOT_EXTREME_LOW)
+            & (merged["price_now"] <= self.NOT_EXTREME_HIGH)
+            & (merged["price_old"] >= self.NOT_EXTREME_LOW)
+            & (merged["price_old"] <= self.NOT_EXTREME_HIGH)
+        ]
 
         # merge question
         result = fast.merge(
@@ -102,20 +112,22 @@ class Velocity(BaseStrategy):
                     strategy_name=self.name,
                     market_ids=[row["market_id"]],
                     description=(
-                        f"{direction} {row['delta_pct']:+.1f}% ({row['outcome']}) — "
-                        + question[:60]
-                        + ("..." if len(question) > 60 else "")
+                        f"{direction} {row['price_old']:.2f}→{row['price_now']:.2f} "
+                        f"(Δ{row['delta_pct']:+.1f}%, {row['outcome']}) — "
+                        + question[:50]
+                        + ("..." if len(question) > 50 else "")
                     ),
-                    edge_pct=row["abs_delta"],
-                    is_profitable=False,  # velocity = signal เท่านั้น ไม่กำไรโดยตรง
+                    edge_pct=row["abs_delta"] * 100,  # show as % points moved
+                    is_profitable=False,
                     metadata={
                         "outcome": row["outcome"],
                         "price_now": round(row["price_now"], 4),
                         "price_old": round(row["price_old"], 4),
+                        "abs_delta": round(row["abs_delta"], 4),
                         "delta_pct": round(row["delta_pct"], 2),
                     },
                 )
             )
 
         opportunities.sort(key=lambda o: o.edge_pct, reverse=True)
-        return opportunities[:20]  # คืนแค่ 20 อันดับแรก
+        return opportunities[:20]
