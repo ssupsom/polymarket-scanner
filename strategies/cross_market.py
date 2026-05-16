@@ -27,7 +27,11 @@ from .base import BaseStrategy, Opportunity
 
 class CrossMarket(BaseStrategy):
 
-    DISCOVERY_THRESHOLD = 0.02  # Σ ต่างจาก 1 เกิน 2%
+    DISCOVERY_THRESHOLD = 0.02
+    SANITY_MAX_EDGE_PCT = 25.0   # edge > นี้ = false positive
+    MIN_GROUP_SIZE = 2
+    MAX_GROUP_SIZE = 4           # 5+ markets มัก match ผิด
+    MIN_KEYWORD_OVERLAP = 3      # อย่างน้อย 3 keywords ต้องตรงกัน
     STOPWORDS = {
         "will", "the", "a", "an", "be", "in", "on", "at", "by", "to", "of",
         "is", "are", "was", "were", "and", "or", "for", "with", "this", "that",
@@ -78,7 +82,7 @@ class CrossMarket(BaseStrategy):
         groups = defaultdict(list)
         for _, row in merged.iterrows():
             kws = self._keywords(row.get("question", ""))
-            if len(kws) < 2:
+            if len(kws) < self.MIN_KEYWORD_OVERLAP:
                 continue
             # ใช้ top-3 keywords เป็น key (ลด combinatorial)
             key = frozenset(sorted(kws)[:3])
@@ -91,7 +95,7 @@ class CrossMarket(BaseStrategy):
         # หา groups ที่มี 2+ markets และ Σ ผิด
         opportunities = []
         for key, entries in groups.items():
-            if len(entries) < 2 or len(entries) > 6:
+            if not (self.MIN_GROUP_SIZE <= len(entries) <= self.MAX_GROUP_SIZE):
                 continue
             sum_p = sum(e["price"] for e in entries)
             deviation = abs(sum_p - 1.0)
@@ -99,6 +103,11 @@ class CrossMarket(BaseStrategy):
                 continue
 
             edge_pct = deviation * 100
+
+            # sanity check
+            if edge_pct > self.SANITY_MAX_EDGE_PCT:
+                continue
+
             descriptions = [
                 f"{e['question'][:40]}.. ({e['price']:.2f})"
                 for e in entries
