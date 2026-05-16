@@ -1,6 +1,6 @@
 """
-Polymarket Scanner — Multi-Strategy Version
-ดึงข้อมูลตลาดจาก Polymarket แล้วเก็บลง Supabase (รวม volume, liquidity)
+Polymarket Scanner — Minimal Viable Version
+ดึงข้อมูลตลาดจาก Polymarket แล้วเก็บลง Supabase
 """
 
 import os
@@ -10,13 +10,15 @@ from datetime import datetime, timezone
 from supabase import create_client
 from dotenv import load_dotenv
 
+# โหลดค่าจาก .env
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 POLYMARKET_API = "https://gamma-api.polymarket.com/markets"
 
-LIMIT = 200
+# ตั้งค่าจำนวนตลาดที่ดึง
+LIMIT = 500
 
 
 def fetch_markets():
@@ -26,7 +28,7 @@ def fetch_markets():
         "active": "true",
         "closed": "false",
         "order": "volume",
-        "ascending": "false",
+        "ascending": "false",  # เรียงจาก volume สูงสุด
     }
     response = requests.get(POLYMARKET_API, params=params, timeout=60)
     response.raise_for_status()
@@ -44,6 +46,7 @@ def parse_market(raw):
     if not outcomes or not prices or len(outcomes) != len(prices):
         return None, []
 
+    # ดึง volume + liquidity (ใช้ None ถ้าไม่มี)
     def _num(key):
         v = raw.get(key)
         try:
@@ -77,12 +80,14 @@ def parse_market(raw):
 def main():
     print(f"[{datetime.now(timezone.utc).isoformat()}] เริ่ม scan...")
 
+    # ตรวจสอบ env
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("ERROR: ไม่พบ SUPABASE_URL หรือ SUPABASE_KEY ใน .env")
         return
 
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+    # 1. ดึงข้อมูล
     try:
         raw_markets = fetch_markets()
         print(f"ดึง {len(raw_markets)} ตลาดมาแล้ว")
@@ -90,6 +95,7 @@ def main():
         print(f"ERROR ดึงข้อมูล: {e}")
         return
 
+    # 2. Parse + เตรียม batch
     market_batch = []
     snapshot_batch = []
 
@@ -105,6 +111,7 @@ def main():
         print("ไม่มีข้อมูลให้บันทึก")
         return
 
+    # 3. Upsert markets (ใส่ใหม่หรือ update ถ้ามีแล้ว)
     try:
         supabase.table("markets").upsert(market_batch).execute()
         print(f"บันทึก markets สำเร็จ")
@@ -112,6 +119,7 @@ def main():
         print(f"ERROR บันทึก markets: {e}")
         return
 
+    # 4. Insert price snapshots (batch 500 rows/ครั้ง เพื่อไม่ติด Supabase limit)
     try:
         BATCH_SIZE = 500
         total = 0
@@ -124,10 +132,10 @@ def main():
         print(f"ERROR บันทึก snapshots: {e}")
         return
 
+    # 5. แสดงตัวอย่าง 3 ตลาดแรก
     print("\n--- ตัวอย่าง 3 ตลาดแรก ---")
     for m in market_batch[:3]:
         print(f"  {m['question'][:60]}...")
-        print(f"    volume={m['volume']}, liquidity={m['liquidity']}")
         market_snaps = [s for s in snapshot_batch if s["market_id"] == m["id"]]
         for s in market_snaps:
             print(f"    {s['outcome']}: {s['price']}")
